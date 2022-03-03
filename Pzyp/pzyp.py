@@ -1,215 +1,176 @@
-
-"""
-
-    Usage:
-        pzyp.py [-c [-l LEVEL] | -d] [-sh] [-p PASSWORD] FILE
-    Options: (some of the options will be implemented after)
-        -h, --help                  show this text
-        -c, --compress              compress FILE
-        -d, --decompress            decompress FILE
-        -l, --comprlevel=LEVEL      compressing LEVEL [default: 2]
-        -s, --sumary                meta-info of compressed FILE
-        -p, --password=PASSWORD     establishes a PASSWORD for FILE encription
-
-        
-
-"""
+'''
+Usage:
+    pzip [-c [-l LEVEL] | -d | -h] [-s] [-p PASSWORD] FILE
+Operation:
+    -c, --encode, --compress            Compress FILE whith PZYP
+    -d, --decode, --decompress          Decompress FILE compressed with PZYP
+Options:
+    -l, --level                         Compression level [default: 2] 
+    -s, --summary                       Resume of compressed file      
+    -h, --help                          Shows this help message and exits.
+    -p PASSWORD, --password=PASSWORD    An optional password to encrypt the file (compress only)
+    FILE                                The path to the file to compress / decompress
+'''
 # imports
 from docopt import docopt
 from typing import Union, BinaryIO, Tuple
 import math
-import io
 import lzss_io
 import bitstruct
 from bitarray import bitarray
+import pzypapp as mw
 
 
-UNENCODED_STRING_SIZE = 8   
-ENCODED_OFFSET_SIZE = 12    
-ENCODED_LEN_SIZE = 4        
-ENCODED_STRING_SIZE = ENCODED_OFFSET_SIZE + ENCODED_LEN_SIZE  
 
-WINDOW_SIZE = 2 ** ENCODED_OFFSET_SIZE        
-BREAK_EVEN_POINT = ENCODED_STRING_SIZE // 8   
-MIN_STRING_SIZE = BREAK_EVEN_POINT + 1        
-MAX_STRING_SIZE = 2 ** ENCODED_LEN_SIZE - 1 + MIN_STRING_SIZE  
+# da referencia lzss_io
+UNENCODED_STRING_SIZE = 8   # in bits
+ENCODED_OFFSET_SIZE = 12    # in bits
+ENCODED_LEN_SIZE = 4        # in bits
+ENCODED_STRING_SIZE = ENCODED_OFFSET_SIZE + ENCODED_LEN_SIZE  # in bits
+
+WINDOW_SIZE = 2 ** ENCODED_OFFSET_SIZE        # in bytes
+BREAK_EVEN_POINT = ENCODED_STRING_SIZE // 8   # in bytes
+MIN_STRING_SIZE = BREAK_EVEN_POINT + 1        # in bytes
+MAX_STRING_SIZE = 2 ** ENCODED_LEN_SIZE - 1 + MIN_STRING_SIZE  # in bytes
+
 ctx = lzss_io.PZYPContext(
-    encoded_offset_size=4,   
-    encoded_len_size=3       
+    encoded_offset_size=4,   # janela terá 16 bytes
+    encoded_len_size=3       # comprimentos de 8 + 1 - 1 = 8 bytes
 )
 
 DEFAULT_EXT = 'LZS'
 
+# RESUMO DO ALGORITMO:
+# itera caractere por caractere
+# Verifica se já viu o caractere antes
+# Se sim, verifica o próximo caractere e prepara um token para ser emitido
+# Se o token for maior que o texto que está representando, não gera um token
+# Adiciona o texto ao buffer de pesquisa e continua
+# Caso contrário, adiciona o caractere ao buffer de pesquisa e continua
 
-class LZ77Compressor:
-    """
-    A simplified implementation of the LZ77 Compression Algorithm
-    """
-    MAX_WINDOW_SIZE = 400
 
-    def __init__(self, window_size=20):
-        self.window_size = min(window_size, self.MAX_WINDOW_SIZE)
-        self.lookahead_buffer_size = 15  # length of match is at most 4 bits
+# Verificação do buffer de pesquisa para mais caracteres
 
-    def compress(self, input_file_path, output_file_path=None, verbose=False):
-        """
-        Given the path of an input file, its content is compressed by applying a simple
-        LZ77 compression algorithm.
+def elements_in_array(check_elements, elements):
+    i = 0
+    offset = 0
+    for element in elements:
+        if len(check_elements) <= offset:
 
-        The compressed format is:
-        0 bit followed by 8 bits (1 byte character) when there are no previous matches
-            within window
-        1 bit followed by 12 bits pointer (distance to the start of the match from the
-            current position) and 4 bits (length of the match)
+            # Todos os elementos no check_elements estão nos elements
+            return i - len(check_elements)
 
-        If a path to the output file is provided, the compressed data is written into
-        a binary file. Otherwise, it is returned as a bitarray
+        if check_elements[offset] == element:
+            offset += 1
+        else:
+            offset = 0
 
-        if verbose is enabled, the compression description is printed to standard output
-        """
-        data = None
-        i = 0
-        output_buffer = bitarray(endian='big')
+        i += 1
+    return -1
 
-        # read the input file
-        try:
-            with open(input_file_path, 'rb') as input_file:
-                data = input_file.read()
-        except IOError:
-            print ('Could not open input file ...')
-            raise
 
-        while i < len(data):
-            # print i
+encoding = "utf-8"
 
-            match = self.findLongestMatch(data, i)
+# compressor
 
-            if match:
-                # Add 1 bit flag, followed by 12 bit for distance, and 4 bit for the length
-                # of the match
-                (bestMatchDistance, bestMatchLength) = match
 
-                output_buffer.append(True)
-                output_buffer.frombytes(chr(bestMatchDistance >> 4))
-                output_buffer.frombytes(
-                    chr(((bestMatchDistance & 0xf) << 4) | bestMatchLength))
+def encode(text, max_sliding_window_size=4096):
+    text_bytes = text.encode(encoding)
 
-                if verbose:
-                    print ("<1, %i, %i>") % (bestMatchDistance, bestMatchLength),
+    search_buffer = []  # Array de numeros inteiros, representando bytes
+    check_characters = []  # Array de numeros inteiros, representando bytes
+    output = []  # Saída do array
 
-                i += bestMatchLength
+    i = 0
+    for char in text_bytes:
+        # O index onde os caracteres aparecem na nossa janela/buffer de pesquisa
+        index = elements_in_array(check_characters, search_buffer)
 
+        if elements_in_array(check_characters + [char], search_buffer) == -1 or i == len(text_bytes) - 1:
+            if i == len(text_bytes) - 1 and elements_in_array(check_characters + [char], search_buffer) != -1:
+                # Se for o ultimo caractere, adiciona o proximo caractere ao texto que o token representa
+                check_characters.append(char)
+
+            if len(check_characters) > 1:
+                index = elements_in_array(check_characters, search_buffer)
+                # Calcular a distância relativa
+                offset = i - index - len(check_characters)
+                # Definir o comprimento do token (Por quantos caracteres o representa)
+                length = len(check_characters)
+
+                token = f"<{offset},{length}>"  # Construir o nosso token
+
+                if len(token) > length:
+                    # Comprimento do token é maior que o comprimento que o representa, por isso imprime os caracteres
+                    output.extend(check_characters)  # Imprime os caracteres
+                else:
+                    # Imprime o nosso token
+                    output.extend(token.encode(encoding))
+
+                # Adiciona os caracteres ao nosso buffer de pesquisa
+                search_buffer.extend(check_characters)
             else:
-                # No useful match was found. Add 0 bit flag, followed by 8 bit for the character
-                output_buffer.append(False)
-                output_buffer.frombytes(data[i])
+                output.extend(check_characters)  # Imprime o caractere
+                # Adiciona os caracteres ao nosso buffer de pesquisa
+                search_buffer.extend(check_characters)
 
-                if verbose:
-                    print ("<0, %s>") % data[i],
+            check_characters = []
 
-                i += 1
+        check_characters.append(char)
 
-        # fill the buffer with zeros if the number of bits is not a multiple of 8
-        output_buffer.fill()
+        # Verifica se o search buffer está a exceder o tamanho maximo da janela
+        if len(search_buffer) > max_sliding_window_size:
+            # Remove o primeiro elemento do buffer de pesquisa
+            search_buffer = search_buffer[1:]
 
-        # write the compressed data into a binary file if a path is provided
-        if output_file_path:
-            try:
-                with open(output_file_path, 'wb') as output_file:
-                    output_file.write(output_buffer.tobytes())
-                    print ("File was compressed successfully and saved to output path ...")
-                    return None
-            except IOError:
-                print ('Could not write to output file path. Please check if the path is correct ...')
-                raise
+        i += 1
 
-        # an output file path was not provided, return the compressed data
-        return output_buffer
+    return bytes(output)
+    # descompressor
+    encoding = "utf-8"
 
-    def decompress(self, input_file_path, output_file_path=None):
-        """
-        Given a string of the compressed file path, the data is decompressed back to its
-        original form, and written into the output file path if provided. If no output
-        file path is provided, the decompressed data is returned as a string
-        """
-        data = bitarray(endian='big')
-        output_buffer = []
 
-        # read the input file
-        try:
-            with open(input_file_path, 'rb') as input_file:
-                data.fromfile(input_file)
-        except IOError:
-            print ('Could not open input file ...')
-            raise
+def decode(text):
 
-        while len(data) >= 9:
+    text_bytes = text.encode(encoding)  # O texto codificado em bytes
+    output = []  # Os caracteres de saída
 
-            flag = data.pop(0)
+    inside_token = False
+    scanning_offset = True
 
-            if not flag:
-                byte = data[0:8].tobytes()
+    length = []  # Numero do comprimento codificado em bytes
+    offset = []  # Numero da distância codificada em bytes
 
-                output_buffer.append(byte)
-                del data[0:8]
+    for char in text_bytes:
+        if char == "<".encode(encoding)[0]:
+            inside_token = True  # Aqui estamos dentro de um token
+            scanning_offset = True  # Aqui estamos a procurar pelo numero do comprimento
+        elif char == ",".encode(encoding)[0] and inside_token:
+            scanning_offset = False
+        elif char == ">".encode(encoding)[0]:
+            inside_token = False  # Já não estamos dentro do token
+
+            # Converter comprimentos e distancias para um numero inteiro
+            length_num = int(bytes(length).decode(encoding))
+            offset_num = int(bytes(offset).decode(encoding))
+
+            # Recebe o texto que o token representa
+            referenced_text = output[-offset_num:][:length_num]
+
+            # referenced_text é uma lista de bytes para que nós usemos o 'extend' para adicionar cada byte na saída
+            output.extend(referenced_text)
+
+            # Reset comprimento e distância
+            length, offset = [], []
+        elif inside_token:
+            if scanning_offset:
+                offset.append(char)
             else:
-                byte1 = ord(data[0:8].tobytes())
-                byte2 = ord(data[8:16].tobytes())
+                length.append(char)
+        else:
+            output.append(char)  # Adiciona o caractere ao nosso output
 
-                del data[0:16]
-                distance = (byte1 << 4) | (byte2 >> 4)
-                length = (byte2 & 0xf)
-
-                for i in range(length):
-                    output_buffer.append(output_buffer[-distance])
-        out_data = ''.join(output_buffer)
-
-        if output_file_path:
-            try:
-                with open(output_file_path, 'wb') as output_file:
-                    output_file.write(out_data)
-                    print ('File was decompressed successfully and saved to output path ...')
-                    return None
-            except IOError:
-                print ('Could not write to output file path. Please check if the path is correct ...')
-                raise
-        return out_data
-
-    def findLongestMatch(self, data, current_position):
-        """
-        Finds the longest match to a substring starting at the current_position
-        in the lookahead buffer from the history window
-        """
-        end_of_buffer = min(current_position +
-                            self.lookahead_buffer_size, len(data) + 1)
-
-        best_match_distance = -1
-        best_match_length = -1
-
-        # Optimization: Only consider substrings of length 2 and greater, and just
-        # output any substring of length 1 (8 bits uncompressed is better than 13 bits
-        # for the flag, distance, and length)
-        for j in range(current_position + 2, end_of_buffer):
-
-            start_index = max(0, current_position - self.window_size)
-            substring = data[current_position:j]
-
-            for i in range(start_index, current_position):
-
-                repetitions = len(substring) / (current_position - i)
-
-                last = len(substring) % (current_position - i)
-
-                matched_string = data[i:current_position] * \
-                    repetitions + data[i:i+last]
-
-                if matched_string == substring and len(substring) > best_match_length:
-                    best_match_distance = current_position - i
-                    best_match_length = len(substring)
-
-        if best_match_distance > 0 and best_match_length > 0:
-            return (best_match_distance, best_match_length)
-        return None
+    return bytes(output)
 
 
 def main():
@@ -217,9 +178,9 @@ def main():
     file = args['FILE']
 
     if args['--compress']:
-        compress_file(file, args['-l'], args["--password"], args["--summary"])
+        encode(file, args["--encode"], args["--summary"])
     if args['--decompress']:
-        decompress_file(file, args["--password"], args["--summary"])
+        decode(file, args["--decode"], args["--summary"])
 
 
 if __name__ == '__main__':
